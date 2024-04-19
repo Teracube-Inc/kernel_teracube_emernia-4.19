@@ -45,6 +45,7 @@
 #include "blk-mq.h"
 #include "blk-mq-sched.h"
 #include "blk-rq-qos.h"
+#include "mtk_mmc_block.h"
 
 #ifdef CONFIG_DEBUG_FS
 struct dentry *blk_debugfs_root;
@@ -413,7 +414,7 @@ void blk_sync_queue(struct request_queue *q)
 	if (q->mq_ops) {
 		struct blk_mq_hw_ctx *hctx;
 		int i;
-
+		mt_bio_queue_free(current);
 		queue_for_each_hw_ctx(q, hctx, i)
 			cancel_delayed_work_sync(&hctx->run_work);
 	} else {

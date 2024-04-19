@@ -1233,13 +1233,13 @@ out:
 		return ext4_shutdown(sb, arg);
 
 	case FS_IOC_ENABLE_VERITY:
-		if (!ext4_has_feature_verity(sb))
-			return -EOPNOTSUPP;
+		/**if (!ext4_has_feature_verity(sb))
+			return -EOPNOTSUPP;**/
 		return fsverity_ioctl_enable(filp, (const void __user *)arg);
 
 	case FS_IOC_MEASURE_VERITY:
-		if (!ext4_has_feature_verity(sb))
-			return -EOPNOTSUPP;
+		/**if (!ext4_has_feature_verity(sb))
+			return -EOPNOTSUPP;**/
 		return fsverity_ioctl_measure(filp, (void __user *)arg);
 
 	default:

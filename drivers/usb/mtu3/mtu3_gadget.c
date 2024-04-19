@@ -6,8 +6,8 @@
  *
  * Author: Chunfeng Yun <chunfeng.yun@mediatek.com>
  */
-
 #include "mtu3.h"
+#include "mtu3_trace.h"
 
 void mtu3_req_complete(struct mtu3_ep *mep,
 		     struct usb_request *req, int status)
@@ -25,7 +25,8 @@ __acquires(mep->mtu->lock)
 
 	mtu = mreq->mtu;
 	mep->busy = 1;
-	spin_unlock(&mtu->lock);
+
+	trace_mtu3_req_complete(mreq);
 
 	/* ep0 makes use of PIO, needn't unmap it */
 	if (mep->epnum)
@@ -33,6 +34,8 @@ __acquires(mep->mtu->lock)
 
 	dev_dbg(mtu->dev, "%s complete req: %p, sts %d, %d/%d\n", mep->name,
 		req, req->status, mreq->request.actual, mreq->request.length);
+
+	spin_unlock(&mtu->lock);
 
 	usb_gadget_giveback_request(&mep->ep, &mreq->request);
 
@@ -58,6 +61,17 @@ static void nuke(struct mtu3_ep *mep, const int status)
 		mreq = list_first_entry(&mep->req_list,
 					struct mtu3_request, list);
 		mtu3_req_complete(mep, &mreq->request, status);
+	}
+}
+
+void mtu3_nuke_all_ep(struct mtu3 *mtu)
+{
+	int i;
+
+	nuke(mtu->ep0, -ESHUTDOWN);
+	for (i = 1; i < mtu->num_eps; i++) {
+		nuke(mtu->in_eps + i, -ESHUTDOWN);
+		nuke(mtu->out_eps + i, -ESHUTDOWN);
 	}
 }
 
@@ -109,15 +123,29 @@ static int mtu3_ep_enable(struct mtu3_ep *mep)
 		break; /*others are ignored */
 	}
 
-	dev_dbg(mtu->dev, "%s maxp:%d, interval:%d, burst:%d, mult:%d\n",
-		__func__, mep->maxp, interval, burst, mult);
-
 	mep->ep.maxpacket = mep->maxp;
 	mep->ep.desc = desc;
 	mep->ep.comp_desc = comp_desc;
 
 	/* slot mainly affects bulk/isoc transfer, so ignore int */
 	mep->slot = usb_endpoint_xfer_int(desc) ? 0 : mtu->slot;
+
+	/* reserve ep slot for super speed */
+	if (mep->slot && mtu->g.speed >= MTU3_SPEED_SUPER) {
+		switch (mtu->ep_slot_mode) {
+		case MTU3_EP_SLOT_MAX:
+			mep->slot = MTU3_U3_IP_SLOT_MAX;
+			break;
+		case MTU3_EP_SLOT_MIN:
+			mep->slot = 0;
+			break;
+		default:
+			break;
+		}
+	}
+
+	dev_info(mtu->dev, "%s %s maxp:%d interval:%d burst:%d slot:%d\n",
+		__func__, mep->name, mep->maxp,	interval, burst, mep->slot);
 
 	ret = mtu3_config_ep(mtu, mep, interval, burst, mult);
 	if (ret < 0)
@@ -206,6 +234,7 @@ error:
 	spin_unlock_irqrestore(&mtu->lock, flags);
 
 	dev_dbg(mtu->dev, "%s active_ep=%d\n", __func__, mtu->active_ep);
+	trace_mtu3_gadget_ep_enable(mep);
 
 	return ret;
 }
@@ -217,6 +246,7 @@ static int mtu3_gadget_ep_disable(struct usb_ep *ep)
 	unsigned long flags;
 
 	dev_dbg(mtu->dev, "%s %s\n", __func__, mep->name);
+	trace_mtu3_gadget_ep_disable(mep);
 
 	if (!(mep->flags & MTU3_EP_ENABLED)) {
 		dev_warn(mtu->dev, "%s is already disabled\n", mep->name);
@@ -247,13 +277,29 @@ struct usb_request *mtu3_alloc_request(struct usb_ep *ep, gfp_t gfp_flags)
 	mreq->request.dma = DMA_ADDR_INVALID;
 	mreq->epnum = mep->epnum;
 	mreq->mep = mep;
+	trace_mtu3_alloc_request(mreq);
 
 	return &mreq->request;
 }
 
 void mtu3_free_request(struct usb_ep *ep, struct usb_request *req)
 {
-	kfree(to_mtu3_request(req));
+	struct mtu3_request *mreq = to_mtu3_request(req);
+	struct mtu3_request *r;
+	struct mtu3_ep *mep = to_mtu3_ep(ep);
+	struct mtu3 *mtu = mep->mtu;
+	unsigned long flags;
+
+	trace_mtu3_free_request(mreq);
+	spin_lock_irqsave(&mtu->lock, flags);
+	list_for_each_entry(r, &mep->req_list, list) {
+		if (r == mreq) {
+			list_del(&mreq->list);
+			break;
+		}
+	}
+	kfree(mreq);
+	spin_unlock_irqrestore(&mtu->lock, flags);
 }
 
 static int mtu3_gadget_queue(struct usb_ep *ep,
@@ -283,10 +329,12 @@ static int mtu3_gadget_queue(struct usb_ep *ep,
 		__func__, mep->is_in ? "TX" : "RX", mreq->epnum, ep->name,
 		mreq, ep->maxpacket, mreq->request.length);
 
-	if (req->length > GPD_BUF_SIZE) {
+	if (req->length > GPD_BUF_SIZE ||
+	    (mtu->gen2cp && req->length > GPD_BUF_SIZE_EL)) {
 		dev_warn(mtu->dev,
 			"req length > supported MAX:%d requested:%d\n",
-			GPD_BUF_SIZE, req->length);
+			mtu->gen2cp ? GPD_BUF_SIZE_EL : GPD_BUF_SIZE,
+			req->length);
 		return -EOPNOTSUPP;
 	}
 
@@ -319,6 +367,7 @@ static int mtu3_gadget_queue(struct usb_ep *ep,
 
 error:
 	spin_unlock_irqrestore(&mtu->lock, flags);
+	trace_mtu3_gadget_queue(mreq);
 
 	return ret;
 }
@@ -336,6 +385,7 @@ static int mtu3_gadget_dequeue(struct usb_ep *ep, struct usb_request *req)
 		return -EINVAL;
 
 	dev_dbg(mtu->dev, "%s : req=%p\n", __func__, req);
+	trace_mtu3_gadget_dequeue(mreq);
 
 	spin_lock_irqsave(&mtu->lock, flags);
 
@@ -406,6 +456,7 @@ static int mtu3_gadget_ep_set_halt(struct usb_ep *ep, int value)
 
 done:
 	spin_unlock_irqrestore(&mtu->lock, flags);
+	trace_mtu3_gadget_ep_set_halt(mep);
 
 	return ret;
 }
@@ -475,6 +526,36 @@ static int mtu3_gadget_set_self_powered(struct usb_gadget *gadget,
 	return 0;
 }
 
+static void mtu3_gadget_set_ready(struct usb_gadget *gadget)
+{
+	struct mtu3 *mtu = gadget_to_mtu3(gadget);
+	struct device_node *np = mtu->dev->of_node;
+	struct property *prop = NULL;
+	int ret = 0;
+
+	dev_info(mtu->dev, "update gadget-ready property\n");
+
+	prop = of_find_property(np, "gadget-ready", NULL);
+	if (!prop) {
+		dev_info(mtu->dev, "no gadget-ready node\n");
+
+		prop = kzalloc(sizeof(*prop), GFP_KERNEL);
+		if (!prop) {
+			pr_err("kzalloc failed\n");
+			return;
+		}
+
+		prop->name = "gadget-ready";
+		ret = of_add_property(np, prop);
+		if (ret) {
+			pr_err("add prop failed\n");
+			return;
+		}
+	}
+
+	mtu->is_gadget_ready = 1;
+}
+
 static int mtu3_gadget_pullup(struct usb_gadget *gadget, int is_on)
 {
 	struct mtu3 *mtu = gadget_to_mtu3(gadget);
@@ -492,10 +573,17 @@ static int mtu3_gadget_pullup(struct usb_gadget *gadget, int is_on)
 		mtu->softconnect = is_on;
 	} else if (is_on != mtu->softconnect) {
 		mtu->softconnect = is_on;
+
+		if (!is_on)
+			mtu3_nuke_all_ep(mtu);
+
 		mtu3_dev_on_off(mtu, is_on);
 	}
 
 	spin_unlock_irqrestore(&mtu->lock, flags);
+
+	if (!mtu->is_gadget_ready && is_on)
+		mtu3_gadget_set_ready(gadget);
 
 	return 0;
 }
@@ -530,7 +618,6 @@ static int mtu3_gadget_start(struct usb_gadget *gadget,
 static void stop_activity(struct mtu3 *mtu)
 {
 	struct usb_gadget_driver *driver = mtu->gadget_driver;
-	int i;
 
 	/* don't disconnect if it's not connected */
 	if (mtu->g.speed == USB_SPEED_UNKNOWN)
@@ -548,11 +635,7 @@ static void stop_activity(struct mtu3 *mtu)
 	 * killing any outstanding requests will quiesce the driver;
 	 * then report disconnect
 	 */
-	nuke(mtu->ep0, -ESHUTDOWN);
-	for (i = 1; i < mtu->num_eps; i++) {
-		nuke(mtu->in_eps + i, -ESHUTDOWN);
-		nuke(mtu->out_eps + i, -ESHUTDOWN);
-	}
+	mtu3_nuke_all_ep(mtu);
 
 	if (driver) {
 		spin_unlock(&mtu->lock);
@@ -578,6 +661,10 @@ static int mtu3_gadget_stop(struct usb_gadget *g)
 
 	spin_unlock_irqrestore(&mtu->lock, flags);
 
+	/*
+	 * avoid kernel panic because mtu3_gadget_stop() assigned NULL
+	 * to mtu->gadget_driver.
+	 */
 	synchronize_irq(mtu->irq);
 	return 0;
 }

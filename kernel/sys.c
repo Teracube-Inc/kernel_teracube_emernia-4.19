@@ -72,6 +72,9 @@
 #include <linux/uaccess.h>
 #include <asm/io.h>
 #include <asm/unistd.h>
+#ifdef CONFIG_MTK_TASK_TURBO
+#include <mt-plat/turbo_common.h>
+#endif
 
 #include "uid16.h"
 
@@ -293,6 +296,14 @@ SYSCALL_DEFINE2(getpriority, int, which, int, who)
 			if (niceval > retval)
 				retval = niceval;
 		}
+#ifdef CONFIG_MTK_ENG_BUILD
+		if (retval == -ESRCH && current->pid == who) {
+			pr_warn("getpriority return unexpected value who:%d "
+				"current:%d niceval:%d retvale:%d", who,
+				current->pid, niceval, retval);
+			BUG();
+		}
+#endif
 		break;
 	case PRIO_PGRP:
 		if (who)
@@ -2476,6 +2487,9 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 			return -EFAULT;
 		set_task_comm(me, comm);
 		proc_comm_connector(me);
+#ifdef CONFIG_MTK_TASK_TURBO
+		sys_set_turbo_task(me);
+#endif
 		break;
 	case PR_GET_NAME:
 		get_task_comm(comm, me);

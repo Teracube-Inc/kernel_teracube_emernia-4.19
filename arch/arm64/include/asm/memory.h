@@ -333,7 +333,7 @@ static inline void *phys_to_virt(phys_addr_t x)
  */
 #define ARCH_PFN_OFFSET		((unsigned long)PHYS_PFN_OFFSET)
 
-#ifndef CONFIG_SPARSEMEM_VMEMMAP
+#if !defined(CONFIG_SPARSEMEM_VMEMMAP) || defined(CONFIG_DEBUG_VIRTUAL)
 #define page_to_virt(x)	({						\
 	__typeof__(x) __page = x;					\
 	void *__addr = __va(page_to_phys(__page));			\

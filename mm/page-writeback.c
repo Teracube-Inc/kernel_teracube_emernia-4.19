@@ -38,6 +38,7 @@
 #include <linux/sched/signal.h>
 #include <linux/mm_inline.h>
 #include <trace/events/writeback.h>
+#include <mt-plat/mtk_blocktag.h>
 
 #include "internal.h"
 
